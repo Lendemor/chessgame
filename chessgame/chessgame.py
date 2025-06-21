@@ -57,11 +57,36 @@ class ChessState(rx.State):
     # Move history
     move_history: rx.Field[list[str]] = rx.field(default_factory=lambda: [])
 
+    # Draw rules tracking
+    halfmove_clock: rx.Field[int] = rx.field(
+        default_factory=lambda: 0
+    )  # For 50-move rule
+    position_history: rx.Field[list[str]] = rx.field(
+        default_factory=lambda: []
+    )  # For threefold repetition
+
+    # Captured pieces tracking
+    captured_white_pieces: rx.Field[list[Piece]] = rx.field(default_factory=lambda: [])
+    captured_black_pieces: rx.Field[list[Piece]] = rx.field(default_factory=lambda: [])
+
     # Undo functionality - store board states and game states
     board_history: rx.Field[list[list[list[Piece]]]] = rx.field(
         default_factory=lambda: []
     )
     player_history: rx.Field[list[PlayerType]] = rx.field(default_factory=lambda: [])
+    captured_white_history: rx.Field[list[list[Piece]]] = rx.field(
+        default_factory=lambda: []
+    )
+    captured_black_history: rx.Field[list[list[Piece]]] = rx.field(
+        default_factory=lambda: []
+    )
+    en_passant_history: rx.Field[list[tuple[int, int] | None]] = rx.field(
+        default_factory=lambda: []
+    )
+    halfmove_clock_history: rx.Field[list[int]] = rx.field(default_factory=lambda: [])
+    position_history_snapshots: rx.Field[list[list[str]]] = rx.field(
+        default_factory=lambda: []
+    )
 
     @rx.event
     def reset_grid(self):
@@ -71,6 +96,12 @@ class ChessState(rx.State):
         self.game_over = False
         self.winner = ""
         self.move_history = []
+        # Reset draw rules tracking
+        self.halfmove_clock = 0
+        self.position_history = []
+        # Reset captured pieces
+        self.captured_white_pieces = []
+        self.captured_black_pieces = []
         # Reset castling rights
         self.white_king_moved = False
         self.white_kingside_rook_moved = False
@@ -88,6 +119,11 @@ class ChessState(rx.State):
         # Initialize history with starting position
         self.board_history = [copy_board(self.grid)]
         self.player_history = [PlayerType.WHITE]
+        self.captured_white_history = [[]]  # Start with empty captured pieces
+        self.captured_black_history = [[]]
+        self.en_passant_history = [None]  # Start with no en passant target
+        self.halfmove_clock_history = [0]  # Start with halfmove clock at 0
+        self.position_history_snapshots = [[]]  # Start with empty position history
         return rx.toast("Game reset! White starts.")
 
     @rx.event
@@ -125,10 +161,20 @@ class ChessState(rx.State):
         # Remove current state and restore previous state
         self.board_history.pop()  # Remove current board state
         self.player_history.pop()  # Remove current player state
+        self.captured_white_history.pop()  # Remove current captured white pieces
+        self.captured_black_history.pop()  # Remove current captured black pieces
+        self.en_passant_history.pop()  # Remove current en passant target
+        self.halfmove_clock_history.pop()  # Remove current halfmove clock
+        self.position_history_snapshots.pop()  # Remove current position history snapshot
 
-        # Restore previous board and player
+        # Restore previous board, player, captured pieces, en passant target, and draw rule states
         self.grid = copy_board(self.board_history[-1])
         self.current_player = self.player_history[-1]
+        self.captured_white_pieces = self.captured_white_history[-1].copy()
+        self.captured_black_pieces = self.captured_black_history[-1].copy()
+        self.en_passant_target = self.en_passant_history[-1]
+        self.halfmove_clock = self.halfmove_clock_history[-1]
+        self.position_history = self.position_history_snapshots[-1].copy()
 
         # Reset game over state in case we had a checkmate/stalemate
         self.game_over = False
@@ -268,6 +314,9 @@ class ChessState(rx.State):
                 "[Promotion]", f"[{piece_symbol}]"
             )
 
+        # Update draw rules tracking - pawn promotion resets halfmove clock
+        self.halfmove_clock = 0
+
         # Now switch turns (if validation enabled)
         if self.turn_validation_enabled:
             self.current_player = (
@@ -276,9 +325,18 @@ class ChessState(rx.State):
                 else PlayerType.WHITE
             )
 
+        # Track position for threefold repetition (after turn switch)
+        current_position = self.get_position_string()
+        self.position_history.append(current_position)
+
         # Save state for undo functionality (after promotion and turn switch)
         self.board_history.append(copy_board(self.grid))
         self.player_history.append(self.current_player)
+        self.captured_white_history.append(self.captured_white_pieces.copy())
+        self.captured_black_history.append(self.captured_black_pieces.copy())
+        self.en_passant_history.append(self.en_passant_target)
+        self.halfmove_clock_history.append(self.halfmove_clock)
+        self.position_history_snapshots.append(self.position_history.copy())
 
         # Check if the move puts the opponent in check or ends the game
         opponent = (
@@ -316,10 +374,74 @@ class ChessState(rx.State):
             piece_type, from_row, from_col, to_row, to_col, is_capture
         )
 
+    def get_position_string(self) -> str:
+        """Generate a string representation of the current position for threefold repetition."""
+        # Include board state, current player, castling rights, and en passant target
+        position_parts = []
+
+        # Board state
+        for row in self.grid:
+            row_str = ""
+            for piece in row:
+                if piece.type == PieceType.NONE:
+                    row_str += "."
+                else:
+                    piece_char = piece.type.value[0].lower()
+                    if piece.owner == PlayerType.WHITE:
+                        piece_char = piece_char.upper()
+                    row_str += piece_char
+            position_parts.append(row_str)
+
+        # Current player
+        position_parts.append(f"turn:{self.current_player.value}")
+
+        # Castling rights
+        castling = ""
+        if not self.white_king_moved and not self.white_kingside_rook_moved:
+            castling += "K"
+        if not self.white_king_moved and not self.white_queenside_rook_moved:
+            castling += "Q"
+        if not self.black_king_moved and not self.black_kingside_rook_moved:
+            castling += "k"
+        if not self.black_king_moved and not self.black_queenside_rook_moved:
+            castling += "q"
+        position_parts.append(f"castle:{castling}")
+
+        # En passant target
+        en_passant = (
+            "none"
+            if self.en_passant_target is None
+            else f"{self.en_passant_target[0]},{self.en_passant_target[1]}"
+        )
+        position_parts.append(f"ep:{en_passant}")
+
+        return "|".join(position_parts)
+
+    def check_threefold_repetition(self) -> bool:
+        """Check if the current position has occurred 3 times (threefold repetition)."""
+        current_position = self.get_position_string()
+        count = self.position_history.count(current_position)
+        return count >= 2  # Current position + 2 previous = 3 total
+
+    def check_fifty_move_rule(self) -> bool:
+        """Check if 50 moves have passed without pawn move or capture."""
+        return self.halfmove_clock >= 100  # 100 half-moves = 50 full moves
+
     def check_game_ending_conditions(self):
-        """Check if the game has ended due to checkmate or stalemate."""
+        """Check if the game has ended due to checkmate, stalemate, or draw rules."""
         if self.game_over:
             return  # Game already over
+
+        # Check for draw conditions first
+        if self.check_fifty_move_rule():
+            self.game_over = True
+            self.winner = "DRAW"
+            return rx.toast("Draw by 50-move rule!")
+
+        if self.check_threefold_repetition():
+            self.game_over = True
+            self.winner = "DRAW"
+            return rx.toast("Draw by threefold repetition!")
 
         # Check current player for checkmate/stalemate
         if ChessEngine.is_checkmate(
@@ -451,6 +573,17 @@ class ChessState(rx.State):
                     and destination_piece.owner != piece_owner
                 ) or is_en_passant
 
+                # Track captured pieces for regular captures
+                if (
+                    is_capture
+                    and not is_en_passant
+                    and destination_piece.type != PieceType.NONE
+                ):
+                    if destination_piece.owner == PlayerType.WHITE:
+                        self.captured_white_pieces.append(destination_piece)
+                    else:
+                        self.captured_black_pieces.append(destination_piece)
+
                 if is_castling:
                     # Execute castling: move both king and rook
                     is_kingside = col > source_col
@@ -472,9 +605,24 @@ class ChessState(rx.State):
 
                     # Remove the captured pawn (on the same row as the moving pawn)
                     captured_pawn_row = source_row
+                    captured_pawn = self.grid[captured_pawn_row][col]
+
+                    # Track the captured pawn
+                    if captured_pawn.owner == PlayerType.WHITE:
+                        self.captured_white_pieces.append(captured_pawn)
+                    else:
+                        self.captured_black_pieces.append(captured_pawn)
+
                     self.grid[captured_pawn_row][col] = NO_PIECE
                 elif is_promotion:
                     # Handle pawn promotion - move pawn but don't switch turns yet
+                    # Track captured piece if promoting with capture
+                    if destination_piece.type != PieceType.NONE:
+                        if destination_piece.owner == PlayerType.WHITE:
+                            self.captured_white_pieces.append(destination_piece)
+                        else:
+                            self.captured_black_pieces.append(destination_piece)
+
                     self.grid[row][col] = moved_piece
                     self.grid[source_row][source_col] = NO_PIECE
 
@@ -516,6 +664,13 @@ class ChessState(rx.State):
                 # Reset drag tracking
                 self.end_drag()
 
+                # Update draw rules tracking (before switching turns)
+                # 50-move rule: increment halfmove clock unless pawn move or capture
+                if piece_type == PieceType.PAWN or is_capture:
+                    self.halfmove_clock = 0  # Reset on pawn move or capture
+                else:
+                    self.halfmove_clock += 1
+
                 # For promotion moves, show promotion dialog and don't switch turns yet
                 if is_promotion:
                     # Add to move history without notation (will be updated after promotion)
@@ -533,9 +688,18 @@ class ChessState(rx.State):
                         else PlayerType.WHITE
                     )
 
+                # Track position for threefold repetition (after turn switch)
+                current_position = self.get_position_string()
+                self.position_history.append(current_position)
+
                 # Save state for undo functionality (after making the move and switching turns)
                 self.board_history.append(copy_board(self.grid))
                 self.player_history.append(self.current_player)
+                self.captured_white_history.append(self.captured_white_pieces.copy())
+                self.captured_black_history.append(self.captured_black_pieces.copy())
+                self.en_passant_history.append(self.en_passant_target)
+                self.halfmove_clock_history.append(self.halfmove_clock)
+                self.position_history_snapshots.append(self.position_history.copy())
 
                 # Check if the move puts the opponent in check
                 opponent = (
@@ -575,9 +739,20 @@ class ChessState(rx.State):
 
                 if is_capture:
                     check_msg = " - Check!" if opponent_in_check else ""
-                    return rx.toast(
-                        f"{move_notation} - Captured {destination_piece.owner.value} {destination_piece.type.value}!{check_msg}",
-                    )
+                    if is_en_passant:
+                        # For en passant, the captured piece is a pawn
+                        captured_owner = (
+                            PlayerType.BLACK
+                            if piece_owner == PlayerType.WHITE
+                            else PlayerType.WHITE
+                        )
+                        return rx.toast(
+                            f"{move_notation} - Captured {captured_owner.value} pawn!{check_msg}",
+                        )
+                    else:
+                        return rx.toast(
+                            f"{move_notation} - Captured {destination_piece.owner.value} {destination_piece.type.value}!{check_msg}",
+                        )
                 else:
                     check_msg = " - Check!" if opponent_in_check else ""
                     return rx.toast(f"{move_notation}{check_msg}")
@@ -1145,6 +1320,95 @@ def debug_panel() -> rx.Component:
     )
 
 
+def captured_pieces_panel() -> rx.Component:
+    """Panel showing captured pieces for both players."""
+    return rx.vstack(
+        rx.heading("Captured Pieces", size="6", color="#ffffff"),
+        # White captured pieces (captured by Black)
+        rx.vstack(
+            rx.hstack(
+                rx.text(
+                    "White Lost:", font_weight="bold", color="#e0e0e0", font_size="sm"
+                ),
+                rx.text(
+                    ChessState.captured_white_pieces.length(),
+                    color="#ff6b6b",
+                    font_weight="bold",
+                    font_size="sm",
+                ),
+                spacing="2",
+                align="center",
+            ),
+            rx.box(
+                rx.foreach(
+                    ChessState.captured_white_pieces,
+                    lambda piece: rx.image(
+                        src=f"{pixel_piece_folder}{piece.owner}_{piece.type}.png",
+                        width="30px",
+                        height="30px",
+                        object_fit="contain",
+                        margin="2px",
+                    ),
+                ),
+                display="flex",
+                flex_wrap="wrap",
+                gap="2px",
+                padding="3",
+                border="1px solid #444",
+                border_radius="6px",
+                background_color="#2a2a2a",
+                min_height="50px",
+                width="100%",
+            ),
+            spacing="2",
+            width="100%",
+        ),
+        # Black captured pieces (captured by White)
+        rx.vstack(
+            rx.hstack(
+                rx.text(
+                    "Black Lost:", font_weight="bold", color="#e0e0e0", font_size="sm"
+                ),
+                rx.text(
+                    ChessState.captured_black_pieces.length(),
+                    color="#ff6b6b",
+                    font_weight="bold",
+                    font_size="sm",
+                ),
+                spacing="2",
+                align="center",
+            ),
+            rx.box(
+                rx.foreach(
+                    ChessState.captured_black_pieces,
+                    lambda piece: rx.image(
+                        src=f"{pixel_piece_folder}{piece.owner}_{piece.type}.png",
+                        width="30px",
+                        height="30px",
+                        object_fit="contain",
+                        margin="2px",
+                    ),
+                ),
+                display="flex",
+                flex_wrap="wrap",
+                gap="2px",
+                padding="3",
+                border="1px solid #444",
+                border_radius="6px",
+                background_color="#2a2a2a",
+                min_height="50px",
+                width="100%",
+            ),
+            spacing="2",
+            width="100%",
+        ),
+        spacing="4",
+        align="start",
+        width="320px",
+        padding="4",
+    )
+
+
 def index() -> rx.Component:
     # Welcome Page (Index)
     return rx.fragment(
@@ -1157,6 +1421,8 @@ def index() -> rx.Component:
                         chessboard(),
                         align="center",
                     ),
+                    # Middle - Captured pieces panel
+                    captured_pieces_panel(),
                     # Right side - Debug panel
                     debug_panel(),
                     spacing="6",
