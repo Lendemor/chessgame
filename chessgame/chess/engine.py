@@ -3,7 +3,7 @@
 from .pieces import Piece, PieceType, PlayerType, NO_PIECE
 from .board import find_king
 
-COL_NOTATION = "ABCDEFGH"
+COL_NOTATION = "abcdefgh"
 
 
 class ChessEngine:
@@ -53,9 +53,14 @@ class ChessEngine:
                 grid, from_row, from_col, to_row, to_col
             )
         elif piece.type == PieceType.KING:
-            return ChessEngine._is_valid_king_move(
-                grid, from_row, from_col, to_row, to_col
-            )
+            # Check for castling first
+            if ChessEngine.is_castling_move(grid, from_row, from_col, to_row, to_col):
+                # Castling validation will be handled separately in the UI layer
+                return True
+            else:
+                return ChessEngine._is_valid_king_move(
+                    grid, from_row, from_col, to_row, to_col
+                )
 
         return False
 
@@ -226,6 +231,95 @@ class ChessEngine:
         grid[to_row][to_col] = captured_piece
 
         return king_in_check
+
+    @staticmethod
+    def is_castling_move(
+        grid: list[list[Piece]], from_row: int, from_col: int, to_row: int, to_col: int
+    ) -> bool:
+        """Check if this is a castling move (king moving 2 squares horizontally)."""
+        piece = grid[from_row][from_col]
+        if piece.type != PieceType.KING:
+            return False
+        
+        # King moving 2 squares horizontally on same row
+        return from_row == to_row and abs(from_col - to_col) == 2
+
+    @staticmethod
+    def is_valid_castling(
+        grid: list[list[Piece]], 
+        from_row: int, 
+        from_col: int, 
+        to_row: int, 
+        to_col: int,
+        player: PlayerType,
+        king_moved: bool,
+        kingside_rook_moved: bool, 
+        queenside_rook_moved: bool
+    ) -> bool:
+        """Validates castling moves."""
+        piece = grid[from_row][from_col]
+        
+        # Must be a king
+        if piece.type != PieceType.KING or piece.owner != player:
+            return False
+            
+        # King must not have moved
+        if king_moved:
+            return False
+            
+        # Must be moving 2 squares horizontally
+        if from_row != to_row or abs(from_col - to_col) != 2:
+            return False
+            
+        # Determine if kingside or queenside castling
+        is_kingside = to_col > from_col
+        
+        # Check if corresponding rook has moved
+        if is_kingside and kingside_rook_moved:
+            return False
+        if not is_kingside and queenside_rook_moved:
+            return False
+            
+        # Get rook position
+        rook_col = 7 if is_kingside else 0
+        rook = grid[from_row][rook_col]
+        
+        # Rook must be present and not moved
+        if rook.type != PieceType.ROOK or rook.owner != player:
+            return False
+            
+        # Path between king and rook must be clear
+        start_col = min(from_col, rook_col) + 1
+        end_col = max(from_col, rook_col)
+        for col in range(start_col, end_col):
+            if grid[from_row][col].type != PieceType.NONE:
+                return False
+                
+        # King must not be in check
+        if ChessEngine.is_in_check(grid, player):
+            return False
+            
+        # King must not pass through or end in check
+        direction = 1 if is_kingside else -1
+        for i in range(1, 3):  # Check squares king passes through and lands on
+            test_col = from_col + (i * direction)
+            
+            # Temporarily move king to test square
+            original_king = grid[from_row][from_col]
+            grid[from_row][from_col] = NO_PIECE
+            grid[from_row][test_col] = original_king
+            
+            # Check if king would be in check
+            in_check = ChessEngine.is_in_check(grid, player)
+            
+            # Restore original position
+            grid[from_row][from_col] = original_king
+            grid[from_row][test_col] = NO_PIECE
+            
+            if in_check:
+                return False
+                
+        return True
 
     @staticmethod
     def get_chess_notation(

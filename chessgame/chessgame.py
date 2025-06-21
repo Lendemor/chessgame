@@ -26,13 +26,29 @@ class ChessState(rx.State):
     # For move highlighting
     dragging_piece_row: rx.Field[int] = rx.field(default_factory=lambda: -1)
     dragging_piece_col: rx.Field[int] = rx.field(default_factory=lambda: -1)
-    
+
     # Game state
     game_over: rx.Field[bool] = rx.field(default_factory=lambda: False)
-    winner: rx.Field[str] = rx.field(default_factory=lambda: "")  # "WHITE", "BLACK", or "DRAW"
+    winner: rx.Field[str] = rx.field(
+        default_factory=lambda: ""
+    )  # "WHITE", "BLACK", or "DRAW"
     
+    # Castling rights - track if king/rooks have moved
+    white_king_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    white_kingside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    white_queenside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    black_king_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    black_kingside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    black_queenside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+
     # Move history
     move_history: rx.Field[list[str]] = rx.field(default_factory=lambda: [])
+
+    # Undo functionality - store board states and game states
+    board_history: rx.Field[list[list[list[Piece]]]] = rx.field(
+        default_factory=lambda: []
+    )
+    player_history: rx.Field[list[PlayerType]] = rx.field(default_factory=lambda: [])
 
     @rx.event
     def reset_grid(self):
@@ -42,6 +58,16 @@ class ChessState(rx.State):
         self.game_over = False
         self.winner = ""
         self.move_history = []
+        # Reset castling rights
+        self.white_king_moved = False
+        self.white_kingside_rook_moved = False
+        self.white_queenside_rook_moved = False
+        self.black_king_moved = False
+        self.black_kingside_rook_moved = False
+        self.black_queenside_rook_moved = False
+        # Initialize history with starting position
+        self.board_history = [copy_board(self.grid)]
+        self.player_history = [PlayerType.WHITE]
         return rx.toast("Game reset! White starts.")
 
     @rx.event
@@ -54,11 +80,41 @@ class ChessState(rx.State):
     @rx.event
     def copy_move_history(self):
         """Copies the move history to clipboard."""
-        history_text = "\n".join(self.move_history) if self.move_history else "No moves yet"
+        history_text = (
+            "\n".join(self.move_history) if self.move_history else "No moves yet"
+        )
         return [
             rx.set_clipboard(history_text),
-            rx.toast("Move history copied to clipboard!")
+            rx.toast("Move history copied to clipboard!"),
         ]
+
+    @rx.event
+    def undo_last_move(self):
+        """Undo the last move."""
+        # Need at least 2 states (starting position + 1 move) to undo
+        if len(self.board_history) < 2:
+            return rx.toast("No moves to undo!")
+
+        # Can't undo if game is over
+        if self.game_over:
+            return rx.toast("Cannot undo after game is over!")
+
+        # Remove the last move from history
+        self.move_history.pop()
+
+        # Remove current state and restore previous state
+        self.board_history.pop()  # Remove current board state
+        self.player_history.pop()  # Remove current player state
+
+        # Restore previous board and player
+        self.grid = copy_board(self.board_history[-1])
+        self.current_player = self.player_history[-1]
+
+        # Reset game over state in case we had a checkmate/stalemate
+        self.game_over = False
+        self.winner = ""
+
+        return rx.toast("Move undone!")
 
     @rx.event
     def start_drag(self, row: int, col: int):
@@ -102,6 +158,23 @@ class ChessState(rx.State):
             self.grid, from_row, from_col, to_row, to_col, player
         )
 
+    def is_castling_move(self, from_row: int, from_col: int, to_row: int, to_col: int) -> bool:
+        """Check if this is a castling move."""
+        return ChessEngine.is_castling_move(self.grid, from_row, from_col, to_row, to_col)
+    
+    def is_valid_castling(self, from_row: int, from_col: int, to_row: int, to_col: int, player: PlayerType) -> bool:
+        """Check if castling move is valid."""
+        if player == PlayerType.WHITE:
+            return ChessEngine.is_valid_castling(
+                self.grid, from_row, from_col, to_row, to_col, player,
+                self.white_king_moved, self.white_kingside_rook_moved, self.white_queenside_rook_moved
+            )
+        else:
+            return ChessEngine.is_valid_castling(
+                self.grid, from_row, from_col, to_row, to_col, player,
+                self.black_king_moved, self.black_kingside_rook_moved, self.black_queenside_rook_moved
+            )
+
     @rx.var
     def current_player_in_check(self) -> bool:
         """Check if the current player is in check."""
@@ -120,78 +193,26 @@ class ChessState(rx.State):
         return ChessEngine.get_chess_notation(
             piece_type, from_row, from_col, to_row, to_col, is_capture
         )
-    
+
     def check_game_ending_conditions(self):
         """Check if the game has ended due to checkmate or stalemate."""
         if self.game_over:
             return  # Game already over
-        
-        # Debug: Check game ending conditions
-        is_in_check = ChessEngine.is_in_check(self.grid, self.current_player)
-        legal_moves = ChessEngine.get_all_legal_moves(self.grid, self.current_player)
-        print(f"Debug - Player: {self.current_player}, In check: {is_in_check}, Legal moves: {len(legal_moves)}")
-        if len(legal_moves) <= 5:  # Show legal moves if there are few
-            for move in legal_moves:
-                from_r, from_c, to_r, to_c = move
-                piece = self.grid[from_r][from_c]
-                # Test if this move would actually leave king in check
-                would_be_in_check = ChessEngine.would_leave_king_in_check(self.grid, from_r, from_c, to_r, to_c, self.current_player)
-                from_square = f"{chr(ord('A') + from_c)}{8-from_r}"
-                to_square = f"{chr(ord('A') + to_c)}{8-to_r}"
-                print(f"  Legal move: {piece.type.value} {from_square} → {to_square} - Would leave in check: {would_be_in_check}")
-                
-        # Extra debug: Show current board state
-        print("Current board state:")
-        for r in range(8):
-            row_str = ""
-            for c in range(8):
-                p = self.grid[r][c]
-                if p.type.value == "none":
-                    row_str += ".. "
-                else:
-                    row_str += f"{p.owner.value}{p.type.value[0].upper()} "
-            print(f"  Row {r}: {row_str}")
-            
-        # Extra debug: Check what squares the black queen can attack
-        queen_pos = None
-        for r in range(8):
-            for c in range(8):
-                p = self.grid[r][c]
-                if p.type.value == "queen" and p.owner.value == "B":
-                    queen_pos = (r, c)
-                    break
-        if queen_pos:
-            qr, qc = queen_pos
-            queen_square = f"{chr(ord('A') + qc)}{8-qr}"
-            print(f"Black queen at {queen_square}")
-            # Check which squares around white king the queen can attack
-            king_squares = [(6,3), (6,4), (6,5), (7,3), (7,4), (7,5)]  # D2, E2, F2, D1, E1, F1
-            for kr, kc in king_squares:
-                can_attack = ChessEngine.is_valid_move(self.grid, qr, qc, kr, kc)
-                square_name = f"{chr(ord('A') + kc)}{8-kr}"
-                print(f"  Queen can attack {square_name}: {can_attack}")
-                
-            # Also check the full diagonal path from H4 to E1
-            print("Diagonal path from H4 to E1:")
-            diagonal_squares = [(4,7), (5,6), (6,5), (7,4)]  # H4, G3, F2, E1
-            for i, (dr, dc) in enumerate(diagonal_squares):
-                piece = self.grid[dr][dc]
-                square_name = f"{chr(ord('A') + dc)}{8-dr}"
-                piece_desc = f"{piece.owner.value}{piece.type.value[0].upper()}" if piece.type.value != "none" else ".."
-                print(f"  {square_name}: {piece_desc}")
-        
+
         # Check current player for checkmate/stalemate
         if ChessEngine.is_checkmate(self.grid, self.current_player):
             self.game_over = True
-            self.winner = "BLACK" if self.current_player == PlayerType.WHITE else "WHITE"
+            self.winner = (
+                "BLACK" if self.current_player == PlayerType.WHITE else "WHITE"
+            )
             winner_name = "Black" if self.winner == "BLACK" else "White"
             return rx.toast(f"Checkmate! {winner_name} wins!")
-        
+
         elif ChessEngine.is_stalemate(self.grid, self.current_player):
             self.game_over = True
             self.winner = "DRAW"
             return rx.toast("Stalemate! The game is a draw.")
-        
+
         return None
 
     @classmethod
@@ -219,7 +240,7 @@ class ChessState(rx.State):
     ):
         """Handles the drop event for a chess piece."""
         print(f"Drop event: target=({row}, {col}), data={data}")
-        
+
         # Prevent moves if game is over
         if self.game_over:
             return rx.toast("Game is over! Reset to play again.")
@@ -265,32 +286,75 @@ class ChessState(rx.State):
                     self.end_drag()
                     return rx.toast("Cannot capture your own piece!")
 
-                # Validate the move according to chess rules
-                if not self.is_valid_move(source_row, source_col, row, col):
-                    self.end_drag()
-                    return rx.toast("Invalid move for this piece!")
+                # Check for castling move
+                is_castling = self.is_castling_move(source_row, source_col, row, col)
+                
+                if is_castling:
+                    # Validate castling
+                    if not self.is_valid_castling(source_row, source_col, row, col, piece_owner):
+                        self.end_drag()
+                        return rx.toast("Invalid castling move!")
+                else:
+                    # Validate regular move according to chess rules
+                    if not self.is_valid_move(source_row, source_col, row, col):
+                        self.end_drag()
+                        return rx.toast("Invalid move for this piece!")
 
-                # Check if this move would leave the player's own king in check
-                if self.would_leave_king_in_check(
-                    source_row, source_col, row, col, piece_owner
-                ):
-                    self.end_drag()
-                    return rx.toast("Cannot leave your king in check!")
+                    # Check if this move would leave the player's own king in check
+                    if self.would_leave_king_in_check(
+                        source_row, source_col, row, col, piece_owner
+                    ):
+                        self.end_drag()
+                        return rx.toast("Cannot leave your king in check!")
+
 
                 # Create the piece object
                 moved_piece = Piece(piece_type, piece_owner)
 
-                # Check if capturing an opponent's piece
+                # Check if capturing an opponent's piece (not possible in castling)
                 is_capture = (
+                    not is_castling and
                     destination_piece.type != PieceType.NONE
                     and destination_piece.owner != piece_owner
                 )
 
-                # Update grid: place piece at destination
-                self.grid[row][col] = moved_piece
+                if is_castling:
+                    # Execute castling: move both king and rook
+                    is_kingside = col > source_col
+                    rook_from_col = 7 if is_kingside else 0
+                    rook_to_col = 5 if is_kingside else 3
+                    
+                    # Move king
+                    self.grid[row][col] = moved_piece
+                    self.grid[source_row][source_col] = NO_PIECE
+                    
+                    # Move rook
+                    rook_piece = self.grid[source_row][rook_from_col]
+                    self.grid[source_row][rook_to_col] = rook_piece
+                    self.grid[source_row][rook_from_col] = NO_PIECE
+                else:
+                    # Regular move: place piece at destination
+                    self.grid[row][col] = moved_piece
+                    # Clear source square
+                    self.grid[source_row][source_col] = NO_PIECE
 
-                # Clear source square
-                self.grid[source_row][source_col] = NO_PIECE
+                # Update castling rights when pieces move
+                if piece_type == PieceType.KING:
+                    if piece_owner == PlayerType.WHITE:
+                        self.white_king_moved = True
+                    else:
+                        self.black_king_moved = True
+                elif piece_type == PieceType.ROOK:
+                    if piece_owner == PlayerType.WHITE:
+                        if source_col == 0:  # Queenside rook
+                            self.white_queenside_rook_moved = True
+                        elif source_col == 7:  # Kingside rook
+                            self.white_kingside_rook_moved = True
+                    else:  # Black
+                        if source_col == 0:  # Queenside rook
+                            self.black_queenside_rook_moved = True
+                        elif source_col == 7:  # Kingside rook
+                            self.black_kingside_rook_moved = True
 
                 # Reset drag tracking
                 self.end_drag()
@@ -303,6 +367,10 @@ class ChessState(rx.State):
                         else PlayerType.WHITE
                     )
 
+                # Save state for undo functionality (after making the move and switching turns)
+                self.board_history.append(copy_board(self.grid))
+                self.player_history.append(self.current_player)
+
                 # Check if the move puts the opponent in check
                 opponent = (
                     PlayerType.BLACK
@@ -312,9 +380,13 @@ class ChessState(rx.State):
                 opponent_in_check = self.is_in_check(opponent)
 
                 # Show appropriate message with chess notation
-                move_notation = self._get_chess_notation(
-                    piece_type, source_row, source_col, row, col, is_capture
-                )
+                if is_castling:
+                    is_kingside = col > source_col
+                    move_notation = "O-O" if is_kingside else "O-O-O"
+                else:
+                    move_notation = self._get_chess_notation(
+                        piece_type, source_row, source_col, row, col, is_capture
+                    )
 
                 # Add to move history with detailed info
                 move_count = len(self.move_history) + 1
@@ -354,8 +426,8 @@ def chess_piece(row: int, col: int) -> rx.Component:
     ncond = (piece.type == PieceType.NONE) & (piece.owner == PlayerType.NONE)
     still_piece = rx.image(
         src=f"{pixel_piece_folder}{piece.owner}_{piece.type}.png",
-        width="40px",
-        height="40px",
+        width="55px",
+        height="55px",
         object_fit="contain",
     )
 
@@ -373,7 +445,7 @@ def chess_piece(row: int, col: int) -> rx.Component:
 
     return rx.cond(
         ncond,
-        rx.box(height="40px", width="40px"),  # Empty box with fixed dimensions
+        rx.box(height="55px", width="55px"),  # Empty box with fixed dimensions
         draggable_piece,
     )
 
@@ -405,8 +477,8 @@ def chess_square(row: int, col: int) -> rx.Component:
             class_name="w-full aspect-square",
             background_color=background_color,
             z_index=1,
-            height="60px",  # Fixed height for consistency
-            width="60px",  # Fixed width for consistency
+            height="75px",  # Fixed height for consistency
+            width="75px",  # Fixed width for consistency
             display="flex",
             align_items="center",
             justify_content="center",
@@ -440,7 +512,7 @@ def chessboard() -> rx.Component:
         col_labels.append(
             rx.box(
                 rx.text(col_letter, font_weight="bold", text_align="center"),
-                width="60px",
+                width="75px",
                 height="30px",
                 display="flex",
                 align_items="center",
@@ -455,17 +527,17 @@ def chessboard() -> rx.Component:
         row_label = rx.box(
             rx.text(str(8 - row), font_weight="bold", text_align="center"),
             width="30px",
-            height="60px",
+            height="75px",
             display="flex",
             align_items="center",
             justify_content="center",
         )
-        
+
         # Row squares
         row_squares = []
         for col in range(8):
             row_squares.append(chess_square(row=row, col=col))
-        
+
         # Combine row label with squares
         board_rows.append(
             rx.hstack(
@@ -499,17 +571,22 @@ def debug_panel() -> rx.Component:
     """Debug panel with game controls and move history."""
     return rx.vstack(
         rx.heading("Game Controls", size="6"),
-        
         # Game status
         rx.vstack(
             rx.cond(
                 ChessState.game_over,
                 rx.vstack(
-                    rx.text("GAME OVER", color="red", font_weight="bold", font_size="lg"),
+                    rx.text(
+                        "GAME OVER", color="red", font_weight="bold", font_size="lg"
+                    ),
                     rx.cond(
                         ChessState.winner == "DRAW",
                         rx.text("It's a draw!", color="orange", font_weight="bold"),
-                        rx.text(f"{ChessState.winner} wins!", color="green", font_weight="bold"),
+                        rx.text(
+                            f"{ChessState.winner} wins!",
+                            color="green",
+                            font_weight="bold",
+                        ),
                     ),
                     spacing="1",
                     align="start",
@@ -531,7 +608,6 @@ def debug_panel() -> rx.Component:
             border="1px solid #ccc",
             border_radius="8px",
         ),
-        
         # Control buttons
         rx.vstack(
             rx.button(
@@ -541,6 +617,19 @@ def debug_panel() -> rx.Component:
                 color="white",
                 _hover={"background_color": "darkred"},
                 width="100%",
+            ),
+            rx.button(
+                "Undo Last Move",
+                on_click=ChessState.undo_last_move,
+                background_color="purple",
+                color="white",
+                _hover={"background_color": "darkpurple"},
+                width="100%",
+                disabled=rx.cond(
+                    (ChessState.move_history.length() == 0) | ChessState.game_over,
+                    True,
+                    False,
+                ),
             ),
             rx.button(
                 rx.cond(
@@ -559,7 +648,6 @@ def debug_panel() -> rx.Component:
             spacing="2",
             width="100%",
         ),
-        
         # Move history
         rx.vstack(
             rx.hstack(
@@ -580,7 +668,9 @@ def debug_panel() -> rx.Component:
             rx.box(
                 rx.foreach(
                     ChessState.move_history,
-                    lambda move: rx.text(move, font_size="sm", font_family="monospace", color="black"),
+                    lambda move: rx.text(
+                        move, font_size="sm", font_family="monospace", color="black"
+                    ),
                 ),
                 height="300px",
                 overflow_y="auto",
@@ -593,7 +683,6 @@ def debug_panel() -> rx.Component:
             spacing="2",
             width="100%",
         ),
-        
         spacing="4",
         align="start",
         width="350px",
