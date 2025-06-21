@@ -106,6 +106,10 @@ class ChessState(rx.State):
 
     turn_validation_enabled: rx.Field[bool] = rx.field(default_factory=lambda: True)
 
+    # For move highlighting
+    dragging_piece_row: rx.Field[int] = rx.field(default_factory=lambda: -1)
+    dragging_piece_col: rx.Field[int] = rx.field(default_factory=lambda: -1)
+
     @rx.event
     def reset_grid(self):
         """Resets the grid to the default state."""
@@ -119,6 +123,27 @@ class ChessState(rx.State):
         self.turn_validation_enabled = not self.turn_validation_enabled
         status = "enabled" if self.turn_validation_enabled else "disabled"
         return rx.toast(f"Turn validation {status}")
+    
+    @rx.event
+    def start_drag(self, row: int, col: int):
+        """Called when starting to drag a piece."""
+        self.dragging_piece_row = row
+        self.dragging_piece_col = col
+        print(f"Started dragging piece at ({row}, {col})")
+    
+    @rx.event
+    def end_drag(self):
+        """Called when ending drag."""
+        print(f"Ended dragging piece from ({self.dragging_piece_row}, {self.dragging_piece_col})")
+        self.dragging_piece_row = -1
+        self.dragging_piece_col = -1
+    
+    def is_drag_source(self, row: int, col: int) -> bool:
+        """Check if this square is the source of the current drag."""
+        return (self.dragging_piece_row == row and 
+                self.dragging_piece_col == col and 
+                self.dragging_piece_row != -1)
+    
 
     def is_valid_move(
         self, from_row: int, from_col: int, to_row: int, to_col: int
@@ -310,6 +335,10 @@ class ChessState(rx.State):
         """Handles the drop event for a chess piece."""
         print(f"Drop event: target=({row}, {col}), data={data}")
 
+        # Set drag state if not already set (for highlighting)
+        if data and "row" in data and "col" in data and self.dragging_piece_row == -1:
+            self.start_drag(data["row"], data["col"])
+
         # Extract the dropped item data
         if data and "row" in data and "col" in data:
             source_row = data.get("row")
@@ -328,8 +357,14 @@ class ChessState(rx.State):
                 and piece_type
                 and piece_owner
             ):
+                # Check if dropping on the same square (cancel move)
+                if source_row == row and source_col == col:
+                    self.end_drag()
+                    return rx.toast("Move cancelled")
+                
                 # Check if it's the correct player's turn (if validation enabled)
                 if self.turn_validation_enabled and piece_owner != self.current_player:
+                    self.end_drag()
                     return rx.toast(f"It's {self.current_player.value}'s turn!")
 
                 # Check if destination square is occupied by own piece
@@ -338,10 +373,12 @@ class ChessState(rx.State):
                     destination_piece.type != PieceType.NONE
                     and destination_piece.owner == piece_owner
                 ):
+                    self.end_drag()
                     return rx.toast("Cannot capture your own piece!")
 
                 # Validate the move according to chess rules
                 if not self.is_valid_move(source_row, source_col, row, col):
+                    self.end_drag()
                     return rx.toast("Invalid move for this piece!")
 
                 # Create the piece object
@@ -358,6 +395,9 @@ class ChessState(rx.State):
 
                 # Clear source square
                 self.grid[source_row][source_col] = NO_PIECE
+                
+                # Reset drag tracking
+                self.end_drag()
 
                 # Switch turns (if validation enabled)
                 if self.turn_validation_enabled:
@@ -425,11 +465,20 @@ def chess_square(row: int, col: int) -> rx.Component:
     """
     player_id = (row + col) % 2
 
+    # Check if this is the drag source by comparing coordinates directly
+    is_source = (ChessState.dragging_piece_row == row) & (ChessState.dragging_piece_col == col) & (ChessState.dragging_piece_row != -1)
+
+    # Determine background color
+    base_color = rx.cond(player_id == 0, "#E7E5E4", "#44403C")
+    source_color = "#FFD700"  # Gold for drag source
+    
+    background_color = rx.cond(is_source, source_color, base_color)
+
     drop_target = rxe.dnd.drop_target(
         rx.box(
             chess_piece(row=row, col=col),
             class_name="w-full aspect-square",
-            background_color=rx.cond(player_id == 0, "#E7E5E4", "#44403C"),
+            background_color=background_color,
             z_index=1,
             height="60px",  # Fixed height for consistency
             width="60px",  # Fixed width for consistency
