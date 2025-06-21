@@ -397,6 +397,24 @@ class ChessEngine:
         return (target_row, from_col)
 
     @staticmethod
+    def is_pawn_promotion(
+        from_row: int, to_row: int, piece_type: PieceType, owner: PlayerType
+    ) -> bool:
+        """Check if a pawn move results in promotion."""
+        if piece_type != PieceType.PAWN:
+            return False
+
+        # White pawns promote when reaching row 0 (rank 8)
+        if owner == PlayerType.WHITE and to_row == 0:
+            return True
+
+        # Black pawns promote when reaching row 7 (rank 1)
+        if owner == PlayerType.BLACK and to_row == 7:
+            return True
+
+        return False
+
+    @staticmethod
     def get_chess_notation(
         piece_type: PieceType,
         from_row: int,

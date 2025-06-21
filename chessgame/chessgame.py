@@ -46,6 +46,14 @@ class ChessState(rx.State):
         default_factory=lambda: None
     )
 
+    # Pawn promotion - track if a promotion is pending
+    promotion_pending: rx.Field[bool] = rx.field(default_factory=lambda: False)
+    promotion_row: rx.Field[int] = rx.field(default_factory=lambda: -1)
+    promotion_col: rx.Field[int] = rx.field(default_factory=lambda: -1)
+    promotion_player: rx.Field[PlayerType] = rx.field(
+        default_factory=lambda: PlayerType.NONE
+    )
+
     # Move history
     move_history: rx.Field[list[str]] = rx.field(default_factory=lambda: [])
 
@@ -72,6 +80,11 @@ class ChessState(rx.State):
         self.black_queenside_rook_moved = False
         # Reset en passant
         self.en_passant_target = None
+        # Reset promotion
+        self.promotion_pending = False
+        self.promotion_row = -1
+        self.promotion_col = -1
+        self.promotion_player = PlayerType.NONE
         # Initialize history with starting position
         self.board_history = [copy_board(self.grid)]
         self.player_history = [PlayerType.WHITE]
@@ -212,6 +225,78 @@ class ChessState(rx.State):
             self.grid, from_row, from_col, to_row, to_col, self.en_passant_target
         )
 
+    def is_pawn_promotion(
+        self, from_row: int, to_row: int, piece_type: PieceType, owner: PlayerType
+    ) -> bool:
+        """Check if a pawn move results in promotion."""
+        return ChessEngine.is_pawn_promotion(from_row, to_row, piece_type, owner)
+
+    @rx.event
+    def promote_pawn(self, piece_type_str: str):
+        """Promote a pawn to the specified piece type."""
+        if not self.promotion_pending:
+            return rx.toast("No pawn promotion pending!")
+
+        # Convert string back to enum
+        piece_type = PieceType(piece_type_str)
+
+        # Create promoted piece
+        promoted_piece = Piece(piece_type, self.promotion_player)
+        self.grid[self.promotion_row][self.promotion_col] = promoted_piece
+
+        # Store promotion info before clearing state
+        promotion_player = self.promotion_player
+
+        # Clear promotion state
+        self.promotion_pending = False
+        self.promotion_row = -1
+        self.promotion_col = -1
+        self.promotion_player = PlayerType.NONE
+
+        # Add promotion notation to move history
+        if self.move_history:
+            last_move = self.move_history[-1]
+            piece_symbol = {
+                PieceType.QUEEN: "Q",
+                PieceType.ROOK: "R",
+                PieceType.BISHOP: "B",
+                PieceType.KNIGHT: "N",
+            }.get(piece_type, "")
+
+            # Update last move with promotion notation
+            self.move_history[-1] = last_move.replace(
+                "[Promotion]", f"[{piece_symbol}]"
+            )
+
+        # Now switch turns (if validation enabled)
+        if self.turn_validation_enabled:
+            self.current_player = (
+                PlayerType.BLACK
+                if self.current_player == PlayerType.WHITE
+                else PlayerType.WHITE
+            )
+
+        # Save state for undo functionality (after promotion and turn switch)
+        self.board_history.append(copy_board(self.grid))
+        self.player_history.append(self.current_player)
+
+        # Check if the move puts the opponent in check or ends the game
+        opponent = (
+            PlayerType.BLACK
+            if promotion_player == PlayerType.WHITE
+            else PlayerType.WHITE
+        )
+        opponent_in_check = self.is_in_check(opponent)
+
+        # Check for game ending conditions after the promotion
+        game_ending_toast = self.check_game_ending_conditions()
+        if game_ending_toast:
+            return game_ending_toast
+
+        # Show promotion success message
+        check_msg = " - Check!" if opponent_in_check else ""
+        return rx.toast(f"Pawn promoted to {piece_type.value}!{check_msg}")
+
     @rx.var
     def current_player_in_check(self) -> bool:
         """Check if the current player is in check."""
@@ -332,6 +417,9 @@ class ChessState(rx.State):
                 is_en_passant = self.is_en_passant_move(
                     source_row, source_col, row, col
                 )
+                is_promotion = self.is_pawn_promotion(
+                    source_row, row, piece_type, piece_owner
+                )
 
                 if is_castling:
                     # Validate castling
@@ -385,6 +473,16 @@ class ChessState(rx.State):
                     # Remove the captured pawn (on the same row as the moving pawn)
                     captured_pawn_row = source_row
                     self.grid[captured_pawn_row][col] = NO_PIECE
+                elif is_promotion:
+                    # Handle pawn promotion - move pawn but don't switch turns yet
+                    self.grid[row][col] = moved_piece
+                    self.grid[source_row][source_col] = NO_PIECE
+
+                    # Set promotion state
+                    self.promotion_pending = True
+                    self.promotion_row = row
+                    self.promotion_col = col
+                    self.promotion_player = piece_owner
                 else:
                     # Regular move: place piece at destination
                     self.grid[row][col] = moved_piece
@@ -417,6 +515,15 @@ class ChessState(rx.State):
 
                 # Reset drag tracking
                 self.end_drag()
+
+                # For promotion moves, show promotion dialog and don't switch turns yet
+                if is_promotion:
+                    # Add to move history without notation (will be updated after promotion)
+                    move_count = len(self.move_history) + 1
+                    move_detail = f"{move_count}. {piece_owner.value} {piece_type.value} ({source_row},{source_col})→({row},{col}) [Promotion]"
+                    self.move_history.append(move_detail)
+
+                    return rx.toast("Choose piece for pawn promotion!")
 
                 # Switch turns (if validation enabled)
                 if self.turn_validation_enabled:
@@ -631,10 +738,282 @@ def chessboard() -> rx.Component:
     )
 
 
+def promotion_dialog() -> rx.Component:
+    """Modal dialog for pawn promotion piece selection."""
+    return rx.cond(
+        ChessState.promotion_pending,
+        # Modal overlay backdrop
+        rx.box(
+            # Backdrop blur effect
+            rx.box(
+                width="100vw",
+                height="100vh",
+                position="fixed",
+                top="0",
+                left="0",
+                background="linear-gradient(135deg, rgba(0,0,0,0.6), rgba(30,30,60,0.8))",
+                backdrop_filter="blur(5px)",
+                z_index="1000",
+            ),
+            # Modal content container
+            rx.center(
+                rx.vstack(
+                    # Header section with crown icon
+                    rx.vstack(
+                        rx.box(
+                            "👑",
+                            font_size="48px",
+                            margin_bottom="16px",
+                        ),
+                        rx.heading(
+                            "Pawn Promotion",
+                            size="9",
+                            text_align="center",
+                            color="#ffffff",
+                            font_weight="700",
+                            letter_spacing="-0.5px",
+                        ),
+                        rx.text(
+                            "Choose your piece wisely",
+                            font_size="18px",
+                            text_align="center",
+                            color="#cccccc",
+                            font_weight="500",
+                            margin_bottom="24px",
+                        ),
+                        spacing="2",
+                        align="center",
+                    ),
+                    # Piece selection - single row with proper spacing
+                    rx.hstack(
+                        # Queen - Golden option
+                        rx.box(
+                            rx.button(
+                                rx.vstack(
+                                    rx.box(
+                                        rx.image(
+                                            src=f"{pixel_piece_folder}{ChessState.promotion_player}_queen.png",
+                                            width="70px",
+                                            height="70px",
+                                            object_fit="contain",
+                                        ),
+                                        padding="10px",
+                                        border_radius="12px",
+                                        background="linear-gradient(145deg, rgba(255, 249, 230, 0.9), rgba(240, 230, 204, 0.9))",
+                                        border="2px solid #ffd700",
+                                        box_shadow="0 4px 15px rgba(255, 215, 0, 0.4)",
+                                    ),
+                                    rx.text(
+                                        "Queen",
+                                        font_weight="bold",
+                                        font_size="13px",
+                                        color="#ffd700",
+                                        margin_top="6px",
+                                    ),
+                                    rx.text(
+                                        "Most Powerful",
+                                        font_size="9px",
+                                        color="#bbb",
+                                        font_style="italic",
+                                    ),
+                                    spacing="1",
+                                    align="center",
+                                ),
+                                on_click=lambda: ChessState.promote_pawn("queen"),
+                                background="transparent",
+                                border="none",
+                                padding="12px",
+                                border_radius="12px",
+                                _hover={
+                                    "background": "rgba(255, 215, 0, 0.15)",
+                                    "transform": "translateY(-3px) scale(1.02)",
+                                },
+                                transition="all 0.3s ease",
+                                cursor="pointer",
+                                width="130px",
+                                height="140px",
+                            ),
+                            flex_shrink="0",
+                        ),
+                        # Rook - Strong option
+                        rx.box(
+                            rx.button(
+                                rx.vstack(
+                                    rx.box(
+                                        rx.image(
+                                            src=f"{pixel_piece_folder}{ChessState.promotion_player}_rook.png",
+                                            width="70px",
+                                            height="70px",
+                                            object_fit="contain",
+                                        ),
+                                        padding="10px",
+                                        border_radius="12px",
+                                        background="linear-gradient(145deg, rgba(232, 244, 253, 0.9), rgba(209, 233, 246, 0.9))",
+                                        border="2px solid #2196F3",
+                                        box_shadow="0 4px 15px rgba(33, 150, 243, 0.3)",
+                                    ),
+                                    rx.text(
+                                        "Rook",
+                                        font_weight="bold",
+                                        font_size="13px",
+                                        color="#4fc3f7",
+                                        margin_top="6px",
+                                    ),
+                                    rx.text(
+                                        "Castle Power",
+                                        font_size="9px",
+                                        color="#bbb",
+                                        font_style="italic",
+                                    ),
+                                    spacing="1",
+                                    align="center",
+                                ),
+                                on_click=lambda: ChessState.promote_pawn("rook"),
+                                background="transparent",
+                                border="none",
+                                padding="12px",
+                                border_radius="12px",
+                                _hover={
+                                    "background": "rgba(33, 150, 243, 0.15)",
+                                    "transform": "translateY(-3px) scale(1.02)",
+                                },
+                                transition="all 0.3s ease",
+                                cursor="pointer",
+                                width="130px",
+                                height="140px",
+                            ),
+                            flex_shrink="0",
+                        ),
+                        # Bishop - Elegant option
+                        rx.box(
+                            rx.button(
+                                rx.vstack(
+                                    rx.box(
+                                        rx.image(
+                                            src=f"{pixel_piece_folder}{ChessState.promotion_player}_bishop.png",
+                                            width="70px",
+                                            height="70px",
+                                            object_fit="contain",
+                                        ),
+                                        padding="10px",
+                                        border_radius="12px",
+                                        background="linear-gradient(145deg, rgba(243, 229, 245, 0.9), rgba(225, 190, 231, 0.9))",
+                                        border="2px solid #9C27B0",
+                                        box_shadow="0 4px 15px rgba(156, 39, 176, 0.3)",
+                                    ),
+                                    rx.text(
+                                        "Bishop",
+                                        font_weight="bold",
+                                        font_size="13px",
+                                        color="#ba68c8",
+                                        margin_top="6px",
+                                    ),
+                                    rx.text(
+                                        "Diagonal Force",
+                                        font_size="9px",
+                                        color="#bbb",
+                                        font_style="italic",
+                                    ),
+                                    spacing="1",
+                                    align="center",
+                                ),
+                                on_click=lambda: ChessState.promote_pawn("bishop"),
+                                background="transparent",
+                                border="none",
+                                padding="12px",
+                                border_radius="12px",
+                                _hover={
+                                    "background": "rgba(156, 39, 176, 0.15)",
+                                    "transform": "translateY(-3px) scale(1.02)",
+                                },
+                                transition="all 0.3s ease",
+                                cursor="pointer",
+                                width="130px",
+                                height="140px",
+                            ),
+                            flex_shrink="0",
+                        ),
+                        # Knight - Tactical option
+                        rx.box(
+                            rx.button(
+                                rx.vstack(
+                                    rx.box(
+                                        rx.image(
+                                            src=f"{pixel_piece_folder}{ChessState.promotion_player}_knight.png",
+                                            width="70px",
+                                            height="70px",
+                                            object_fit="contain",
+                                        ),
+                                        padding="10px",
+                                        border_radius="12px",
+                                        background="linear-gradient(145deg, rgba(255, 243, 224, 0.9), rgba(255, 224, 178, 0.9))",
+                                        border="2px solid #FF9800",
+                                        box_shadow="0 4px 15px rgba(255, 152, 0, 0.3)",
+                                    ),
+                                    rx.text(
+                                        "Knight",
+                                        font_weight="bold",
+                                        font_size="13px",
+                                        color="#ffb74d",
+                                        margin_top="6px",
+                                    ),
+                                    rx.text(
+                                        "L-Shape Master",
+                                        font_size="9px",
+                                        color="#bbb",
+                                        font_style="italic",
+                                    ),
+                                    spacing="1",
+                                    align="center",
+                                ),
+                                on_click=lambda: ChessState.promote_pawn("knight"),
+                                background="transparent",
+                                border="none",
+                                padding="12px",
+                                border_radius="12px",
+                                _hover={
+                                    "background": "rgba(255, 152, 0, 0.15)",
+                                    "transform": "translateY(-3px) scale(1.02)",
+                                },
+                                transition="all 0.3s ease",
+                                cursor="pointer",
+                                width="130px",
+                                height="140px",
+                            ),
+                            flex_shrink="0",
+                        ),
+                        spacing="5",
+                        justify="center",
+                        align="center",
+                        flex_wrap="nowrap",
+                    ),
+                    spacing="6",
+                    align="center",
+                    background="linear-gradient(145deg, #2a2a2a, #1e1e1e)",
+                    padding="40px",
+                    border_radius="20px",
+                    box_shadow="0 20px 60px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.1)",
+                    border="1px solid rgba(255, 255, 255, 0.1)",
+                    max_width="700px",
+                    margin="auto",
+                ),
+                width="100vw",
+                height="100vh",
+                position="fixed",
+                top="0",
+                left="0",
+                z_index="1001",
+                padding="20px",
+            ),
+        ),
+        rx.box(),  # Empty box when not promoting
+    )
+
+
 def debug_panel() -> rx.Component:
     """Debug panel with game controls and move history."""
     return rx.vstack(
-        rx.heading("Game Controls", size="6"),
+        rx.heading("Game Controls", size="6", color="#ffffff"),
         # Game status
         rx.vstack(
             rx.cond(
@@ -656,10 +1035,12 @@ def debug_panel() -> rx.Component:
                     align="start",
                 ),
                 rx.vstack(
-                    rx.text("Current Player: ", ChessState.current_player),
+                    rx.text(
+                        "Current Player: ", ChessState.current_player, color="#e0e0e0"
+                    ),
                     rx.cond(
                         ChessState.current_player_in_check,
-                        rx.text("IN CHECK!", color="red", font_weight="bold"),
+                        rx.text("IN CHECK!", color="#ff5722", font_weight="bold"),
                         rx.text(""),
                     ),
                     spacing="1",
@@ -669,8 +1050,9 @@ def debug_panel() -> rx.Component:
             spacing="2",
             align="start",
             padding="4",
-            border="1px solid #ccc",
+            border="1px solid #444",
             border_radius="8px",
+            background_color="#2a2a2a",
         ),
         # Control buttons
         rx.vstack(
@@ -712,17 +1094,18 @@ def debug_panel() -> rx.Component:
             spacing="2",
             width="100%",
         ),
-        # Move history
+        # Move history - Dark theme
         rx.vstack(
             rx.hstack(
-                rx.heading("Move History", size="5"),
+                rx.heading("Move History", size="5", color="#ffffff"),
                 rx.button(
                     "Copy History",
                     on_click=ChessState.copy_move_history,
                     size="2",
-                    background_color="blue",
+                    background_color="#3f51b5",
                     color="white",
-                    _hover={"background_color": "darkblue"},
+                    _hover={"background_color": "#303f9f"},
+                    border_radius="6px",
                 ),
                 spacing="2",
                 align="center",
@@ -733,16 +1116,24 @@ def debug_panel() -> rx.Component:
                 rx.foreach(
                     ChessState.move_history,
                     lambda move: rx.text(
-                        move, font_size="sm", font_family="monospace", color="black"
+                        move,
+                        font_size="sm",
+                        font_family="monospace",
+                        color="#e0e0e0",
+                        padding_y="1",
+                        _hover={"background_color": "rgba(255, 255, 255, 0.05)"},
+                        border_radius="2px",
+                        padding_x="2",
                     ),
                 ),
                 height="300px",
                 overflow_y="auto",
-                border="1px solid #ccc",
-                border_radius="4px",
-                padding="2",
+                border="1px solid #444",
+                border_radius="8px",
+                padding="3",
                 width="100%",
-                background_color="#ffffff",
+                background_color="#1a1a1a",
+                box_shadow="inset 0 2px 4px rgba(0, 0, 0, 0.3)",
             ),
             spacing="2",
             width="100%",
@@ -756,26 +1147,30 @@ def debug_panel() -> rx.Component:
 
 def index() -> rx.Component:
     # Welcome Page (Index)
-    return rx.container(
-        rx.vstack(
-            rx.heading("Chess Game", class_name="text-3xl", text_align="center"),
-            rx.hstack(
-                # Left side - Chessboard
-                rx.vstack(
-                    chessboard(),
-                    align="center",
+    return rx.fragment(
+        rx.container(
+            rx.vstack(
+                rx.heading("Chess Game", class_name="text-3xl", text_align="center"),
+                rx.hstack(
+                    # Left side - Chessboard
+                    rx.vstack(
+                        chessboard(),
+                        align="center",
+                    ),
+                    # Right side - Debug panel
+                    debug_panel(),
+                    spacing="6",
+                    align="start",
+                    justify="center",
                 ),
-                # Right side - Debug panel
-                debug_panel(),
-                spacing="6",
-                align="start",
-                justify="center",
+                spacing="4",
+                align="center",
             ),
-            spacing="4",
-            align="center",
+            height="100vh",
+            padding="4",
         ),
-        height="100vh",
-        padding="4",
+        # Promotion modal dialog (appears on top when needed)
+        promotion_dialog(),
     )
 
 
