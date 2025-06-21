@@ -123,27 +123,30 @@ class ChessState(rx.State):
         self.turn_validation_enabled = not self.turn_validation_enabled
         status = "enabled" if self.turn_validation_enabled else "disabled"
         return rx.toast(f"Turn validation {status}")
-    
+
     @rx.event
     def start_drag(self, row: int, col: int):
         """Called when starting to drag a piece."""
         self.dragging_piece_row = row
         self.dragging_piece_col = col
         print(f"Started dragging piece at ({row}, {col})")
-    
+
     @rx.event
     def end_drag(self):
         """Called when ending drag."""
-        print(f"Ended dragging piece from ({self.dragging_piece_row}, {self.dragging_piece_col})")
+        print(
+            f"Ended dragging piece from ({self.dragging_piece_row}, {self.dragging_piece_col})"
+        )
         self.dragging_piece_row = -1
         self.dragging_piece_col = -1
-    
+
     def is_drag_source(self, row: int, col: int) -> bool:
         """Check if this square is the source of the current drag."""
-        return (self.dragging_piece_row == row and 
-                self.dragging_piece_col == col and 
-                self.dragging_piece_row != -1)
-    
+        return (
+            self.dragging_piece_row == row
+            and self.dragging_piece_col == col
+            and self.dragging_piece_row != -1
+        )
 
     def is_valid_move(
         self, from_row: int, from_col: int, to_row: int, to_col: int
@@ -273,6 +276,70 @@ class ChessState(rx.State):
 
         return True
 
+    def find_king(self, player: PlayerType) -> tuple[int, int] | None:
+        """Find the position of the king for the given player."""
+        for row in range(8):
+            for col in range(8):
+                piece = self.grid[row][col]
+                if piece.type == PieceType.KING and piece.owner == player:
+                    return (row, col)
+        return None
+
+    def is_square_under_attack(self, row: int, col: int, by_player: PlayerType) -> bool:
+        """Check if a square is under attack by any piece of the given player."""
+        for attack_row in range(8):
+            for attack_col in range(8):
+                piece = self.grid[attack_row][attack_col]
+
+                # Skip empty squares and pieces not owned by the attacking player
+                if piece.type == PieceType.NONE or piece.owner != by_player:
+                    continue
+
+                # Check if this piece can attack the target square
+                if self.is_valid_move(attack_row, attack_col, row, col):
+                    return True
+
+        return False
+
+    def is_in_check(self, player: PlayerType) -> bool:
+        """Check if the given player's king is in check."""
+        king_pos = self.find_king(player)
+        if king_pos is None:
+            return False  # No king found (shouldn't happen in normal game)
+
+        king_row, king_col = king_pos
+        enemy_player = (
+            PlayerType.BLACK if player == PlayerType.WHITE else PlayerType.WHITE
+        )
+
+        return self.is_square_under_attack(king_row, king_col, enemy_player)
+
+    def would_leave_king_in_check(
+        self, from_row: int, from_col: int, to_row: int, to_col: int, player: PlayerType
+    ) -> bool:
+        """Check if a move would leave the player's king in check."""
+        # Save the current state
+        original_piece = self.grid[from_row][from_col]
+        captured_piece = self.grid[to_row][to_col]
+
+        # Temporarily make the move
+        self.grid[to_row][to_col] = original_piece
+        self.grid[from_row][from_col] = NO_PIECE
+
+        # Check if king is in check after the move
+        king_in_check = self.is_in_check(player)
+
+        # Restore the original state
+        self.grid[from_row][from_col] = original_piece
+        self.grid[to_row][to_col] = captured_piece
+
+        return king_in_check
+
+    @rx.var
+    def current_player_in_check(self) -> bool:
+        """Check if the current player is in check."""
+        return self.is_in_check(self.current_player)
+
     def _get_chess_notation(
         self,
         piece_type: PieceType,
@@ -361,7 +428,7 @@ class ChessState(rx.State):
                 if source_row == row and source_col == col:
                     self.end_drag()
                     return rx.toast("Move cancelled")
-                
+
                 # Check if it's the correct player's turn (if validation enabled)
                 if self.turn_validation_enabled and piece_owner != self.current_player:
                     self.end_drag()
@@ -381,6 +448,13 @@ class ChessState(rx.State):
                     self.end_drag()
                     return rx.toast("Invalid move for this piece!")
 
+                # Check if this move would leave the player's own king in check
+                if self.would_leave_king_in_check(
+                    source_row, source_col, row, col, piece_owner
+                ):
+                    self.end_drag()
+                    return rx.toast("Cannot leave your king in check!")
+
                 # Create the piece object
                 moved_piece = Piece(piece_type, piece_owner)
 
@@ -395,7 +469,7 @@ class ChessState(rx.State):
 
                 # Clear source square
                 self.grid[source_row][source_col] = NO_PIECE
-                
+
                 # Reset drag tracking
                 self.end_drag()
 
@@ -407,16 +481,31 @@ class ChessState(rx.State):
                         else PlayerType.WHITE
                     )
 
+                # Check if the move puts the opponent in check
+                opponent = (
+                    PlayerType.BLACK
+                    if piece_owner == PlayerType.WHITE
+                    else PlayerType.WHITE
+                )
+                opponent_in_check = self.is_in_check(opponent)
+
                 # Show appropriate message with chess notation
                 move_notation = self._get_chess_notation(
                     piece_type, source_row, source_col, row, col, is_capture
                 )
+
+                # Add check notation if opponent is in check
+                if opponent_in_check:
+                    move_notation += "+"
+
                 if is_capture:
+                    check_msg = " - Check!" if opponent_in_check else ""
                     return rx.toast(
-                        f"{move_notation} - Captured {destination_piece.owner.value} {destination_piece.type.value}!",
+                        f"{move_notation} - Captured {destination_piece.owner.value} {destination_piece.type.value}!{check_msg}",
                     )
                 else:
-                    return rx.toast(move_notation)
+                    check_msg = " - Check!" if opponent_in_check else ""
+                    return rx.toast(f"{move_notation}{check_msg}")
 
         return rx.toast("Invalid move attempt")
 
@@ -466,12 +555,16 @@ def chess_square(row: int, col: int) -> rx.Component:
     player_id = (row + col) % 2
 
     # Check if this is the drag source by comparing coordinates directly
-    is_source = (ChessState.dragging_piece_row == row) & (ChessState.dragging_piece_col == col) & (ChessState.dragging_piece_row != -1)
+    is_source = (
+        (ChessState.dragging_piece_row == row)
+        & (ChessState.dragging_piece_col == col)
+        & (ChessState.dragging_piece_row != -1)
+    )
 
     # Determine background color
     base_color = rx.cond(player_id == 0, "#E7E5E4", "#44403C")
     source_color = "#FFD700"  # Gold for drag source
-    
+
     background_color = rx.cond(is_source, source_color, base_color)
 
     drop_target = rxe.dnd.drop_target(
@@ -535,7 +628,16 @@ def index() -> rx.Component:
         rx.vstack(
             rx.heading("Chess Game", class_name="text-3xl"),
             rx.hstack(
-                rx.text("Current Player: ", ChessState.current_player),
+                rx.vstack(
+                    rx.text("Current Player: ", ChessState.current_player),
+                    rx.cond(
+                        ChessState.current_player_in_check,
+                        rx.text("IN CHECK!", color="red", font_weight="bold"),
+                        rx.text(""),
+                    ),
+                    spacing="1",
+                    align="start",
+                ),
                 rx.button(
                     "Reset Game",
                     on_click=ChessState.reset_grid,
