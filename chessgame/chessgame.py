@@ -32,7 +32,7 @@ class ChessState(rx.State):
     winner: rx.Field[str] = rx.field(
         default_factory=lambda: ""
     )  # "WHITE", "BLACK", or "DRAW"
-    
+
     # Castling rights - track if king/rooks have moved
     white_king_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
     white_kingside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
@@ -40,6 +40,11 @@ class ChessState(rx.State):
     black_king_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
     black_kingside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
     black_queenside_rook_moved: rx.Field[bool] = rx.field(default_factory=lambda: False)
+
+    # En passant - track target square for en passant capture
+    en_passant_target: rx.Field[tuple[int, int] | None] = rx.field(
+        default_factory=lambda: None
+    )
 
     # Move history
     move_history: rx.Field[list[str]] = rx.field(default_factory=lambda: [])
@@ -65,6 +70,8 @@ class ChessState(rx.State):
         self.black_king_moved = False
         self.black_kingside_rook_moved = False
         self.black_queenside_rook_moved = False
+        # Reset en passant
+        self.en_passant_target = None
         # Initialize history with starting position
         self.board_history = [copy_board(self.grid)]
         self.player_history = [PlayerType.WHITE]
@@ -144,7 +151,9 @@ class ChessState(rx.State):
         self, from_row: int, from_col: int, to_row: int, to_col: int
     ) -> bool:
         """Validates if a move is legal according to chess rules."""
-        return ChessEngine.is_valid_move(self.grid, from_row, from_col, to_row, to_col)
+        return ChessEngine.is_valid_move(
+            self.grid, from_row, from_col, to_row, to_col, self.en_passant_target
+        )
 
     def is_in_check(self, player: PlayerType) -> bool:
         """Check if the given player's king is in check."""
@@ -158,22 +167,50 @@ class ChessState(rx.State):
             self.grid, from_row, from_col, to_row, to_col, player
         )
 
-    def is_castling_move(self, from_row: int, from_col: int, to_row: int, to_col: int) -> bool:
+    def is_castling_move(
+        self, from_row: int, from_col: int, to_row: int, to_col: int
+    ) -> bool:
         """Check if this is a castling move."""
-        return ChessEngine.is_castling_move(self.grid, from_row, from_col, to_row, to_col)
-    
-    def is_valid_castling(self, from_row: int, from_col: int, to_row: int, to_col: int, player: PlayerType) -> bool:
+        return ChessEngine.is_castling_move(
+            self.grid, from_row, from_col, to_row, to_col
+        )
+
+    def is_valid_castling(
+        self, from_row: int, from_col: int, to_row: int, to_col: int, player: PlayerType
+    ) -> bool:
         """Check if castling move is valid."""
         if player == PlayerType.WHITE:
             return ChessEngine.is_valid_castling(
-                self.grid, from_row, from_col, to_row, to_col, player,
-                self.white_king_moved, self.white_kingside_rook_moved, self.white_queenside_rook_moved
+                self.grid,
+                from_row,
+                from_col,
+                to_row,
+                to_col,
+                player,
+                self.white_king_moved,
+                self.white_kingside_rook_moved,
+                self.white_queenside_rook_moved,
             )
         else:
             return ChessEngine.is_valid_castling(
-                self.grid, from_row, from_col, to_row, to_col, player,
-                self.black_king_moved, self.black_kingside_rook_moved, self.black_queenside_rook_moved
+                self.grid,
+                from_row,
+                from_col,
+                to_row,
+                to_col,
+                player,
+                self.black_king_moved,
+                self.black_kingside_rook_moved,
+                self.black_queenside_rook_moved,
             )
+
+    def is_en_passant_move(
+        self, from_row: int, from_col: int, to_row: int, to_col: int
+    ) -> bool:
+        """Check if this is an en passant capture."""
+        return ChessEngine.is_en_passant_move(
+            self.grid, from_row, from_col, to_row, to_col, self.en_passant_target
+        )
 
     @rx.var
     def current_player_in_check(self) -> bool:
@@ -200,7 +237,9 @@ class ChessState(rx.State):
             return  # Game already over
 
         # Check current player for checkmate/stalemate
-        if ChessEngine.is_checkmate(self.grid, self.current_player):
+        if ChessEngine.is_checkmate(
+            self.grid, self.current_player, self.en_passant_target
+        ):
             self.game_over = True
             self.winner = (
                 "BLACK" if self.current_player == PlayerType.WHITE else "WHITE"
@@ -208,7 +247,9 @@ class ChessState(rx.State):
             winner_name = "Black" if self.winner == "BLACK" else "White"
             return rx.toast(f"Checkmate! {winner_name} wins!")
 
-        elif ChessEngine.is_stalemate(self.grid, self.current_player):
+        elif ChessEngine.is_stalemate(
+            self.grid, self.current_player, self.en_passant_target
+        ):
             self.game_over = True
             self.winner = "DRAW"
             return rx.toast("Stalemate! The game is a draw.")
@@ -286,12 +327,17 @@ class ChessState(rx.State):
                     self.end_drag()
                     return rx.toast("Cannot capture your own piece!")
 
-                # Check for castling move
+                # Check for special moves
                 is_castling = self.is_castling_move(source_row, source_col, row, col)
-                
+                is_en_passant = self.is_en_passant_move(
+                    source_row, source_col, row, col
+                )
+
                 if is_castling:
                     # Validate castling
-                    if not self.is_valid_castling(source_row, source_col, row, col, piece_owner):
+                    if not self.is_valid_castling(
+                        source_row, source_col, row, col, piece_owner
+                    ):
                         self.end_drag()
                         return rx.toast("Invalid castling move!")
                 else:
@@ -307,31 +353,38 @@ class ChessState(rx.State):
                         self.end_drag()
                         return rx.toast("Cannot leave your king in check!")
 
-
                 # Create the piece object
                 moved_piece = Piece(piece_type, piece_owner)
 
-                # Check if capturing an opponent's piece (not possible in castling)
+                # Check if capturing an opponent's piece
                 is_capture = (
-                    not is_castling and
-                    destination_piece.type != PieceType.NONE
+                    not is_castling
+                    and destination_piece.type != PieceType.NONE
                     and destination_piece.owner != piece_owner
-                )
+                ) or is_en_passant
 
                 if is_castling:
                     # Execute castling: move both king and rook
                     is_kingside = col > source_col
                     rook_from_col = 7 if is_kingside else 0
                     rook_to_col = 5 if is_kingside else 3
-                    
+
                     # Move king
                     self.grid[row][col] = moved_piece
                     self.grid[source_row][source_col] = NO_PIECE
-                    
+
                     # Move rook
                     rook_piece = self.grid[source_row][rook_from_col]
                     self.grid[source_row][rook_to_col] = rook_piece
                     self.grid[source_row][rook_from_col] = NO_PIECE
+                elif is_en_passant:
+                    # Execute en passant: move pawn and remove captured pawn
+                    self.grid[row][col] = moved_piece
+                    self.grid[source_row][source_col] = NO_PIECE
+
+                    # Remove the captured pawn (on the same row as the moving pawn)
+                    captured_pawn_row = source_row
+                    self.grid[captured_pawn_row][col] = NO_PIECE
                 else:
                     # Regular move: place piece at destination
                     self.grid[row][col] = moved_piece
@@ -355,6 +408,12 @@ class ChessState(rx.State):
                             self.black_queenside_rook_moved = True
                         elif source_col == 7:  # Kingside rook
                             self.black_kingside_rook_moved = True
+
+                # Update en passant target
+                new_en_passant_target = ChessEngine.get_en_passant_target(
+                    source_row, source_col, row, col, piece_type, piece_owner
+                )
+                self.en_passant_target = new_en_passant_target
 
                 # Reset drag tracking
                 self.end_drag()
@@ -383,6 +442,11 @@ class ChessState(rx.State):
                 if is_castling:
                     is_kingside = col > source_col
                     move_notation = "O-O" if is_kingside else "O-O-O"
+                elif is_en_passant:
+                    # En passant notation: e.g., "exd6 e.p."
+                    from_file = chr(ord("a") + source_col)
+                    to_square = f"{chr(ord('a') + col)}{8 - row}"
+                    move_notation = f"{from_file}x{to_square} e.p."
                 else:
                     move_notation = self._get_chess_notation(
                         piece_type, source_row, source_col, row, col, is_capture

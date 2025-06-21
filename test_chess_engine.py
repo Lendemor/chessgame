@@ -138,12 +138,8 @@ class TestBasicMoves:
             assert ChessEngine.is_valid_move(board, from_r, from_c, to_r, to_c)
 
         # Invalid multi-square move (but not on back rank to avoid castling detection)
-        assert (
-            not ChessEngine.is_valid_move(board, 4, 4, 6, 4)
-        )  # 2 squares vertical
-        assert (
-            not ChessEngine.is_valid_move(board, 4, 4, 2, 4)
-        )  # 2 squares vertical
+        assert not ChessEngine.is_valid_move(board, 4, 4, 6, 4)  # 2 squares vertical
+        assert not ChessEngine.is_valid_move(board, 4, 4, 2, 4)  # 2 squares vertical
 
 
 class TestPathBlocking:
@@ -228,32 +224,28 @@ class TestCastling:
         board[7][0] = Piece(PieceType.ROOK, PlayerType.WHITE)  # Rook on a1
 
         # Valid castling (clear path, pieces haven't moved, not in check)
-        assert (
-            ChessEngine.is_valid_castling(
-                board,
-                7,
-                4,
-                7,
-                6,
-                PlayerType.WHITE,
-                king_moved=False,
-                kingside_rook_moved=False,
-                queenside_rook_moved=False,
-            )
+        assert ChessEngine.is_valid_castling(
+            board,
+            7,
+            4,
+            7,
+            6,
+            PlayerType.WHITE,
+            king_moved=False,
+            kingside_rook_moved=False,
+            queenside_rook_moved=False,
         )
 
-        assert (
-            ChessEngine.is_valid_castling(
-                board,
-                7,
-                4,
-                7,
-                2,
-                PlayerType.WHITE,
-                king_moved=False,
-                kingside_rook_moved=False,
-                queenside_rook_moved=False,
-            )
+        assert ChessEngine.is_valid_castling(
+            board,
+            7,
+            4,
+            7,
+            2,
+            PlayerType.WHITE,
+            king_moved=False,
+            kingside_rook_moved=False,
+            queenside_rook_moved=False,
         )
 
     def test_invalid_castling_king_moved(self):
@@ -263,18 +255,16 @@ class TestCastling:
         board[7][7] = Piece(PieceType.ROOK, PlayerType.WHITE)
 
         # Invalid because king has moved
-        assert (
-            not ChessEngine.is_valid_castling(
-                board,
-                7,
-                4,
-                7,
-                6,
-                PlayerType.WHITE,
-                king_moved=True,
-                kingside_rook_moved=False,
-                queenside_rook_moved=False,
-            )
+        assert not ChessEngine.is_valid_castling(
+            board,
+            7,
+            4,
+            7,
+            6,
+            PlayerType.WHITE,
+            king_moved=True,
+            kingside_rook_moved=False,
+            queenside_rook_moved=False,
         )
 
     def test_invalid_castling_rook_moved(self):
@@ -284,18 +274,16 @@ class TestCastling:
         board[7][7] = Piece(PieceType.ROOK, PlayerType.WHITE)
 
         # Invalid because kingside rook has moved
-        assert (
-            not ChessEngine.is_valid_castling(
-                board,
-                7,
-                4,
-                7,
-                6,
-                PlayerType.WHITE,
-                king_moved=False,
-                kingside_rook_moved=True,
-                queenside_rook_moved=False,
-            )
+        assert not ChessEngine.is_valid_castling(
+            board,
+            7,
+            4,
+            7,
+            6,
+            PlayerType.WHITE,
+            king_moved=False,
+            kingside_rook_moved=True,
+            queenside_rook_moved=False,
         )
 
     def test_invalid_castling_blocked_path(self):
@@ -306,18 +294,16 @@ class TestCastling:
         board[7][5] = Piece(PieceType.BISHOP, PlayerType.WHITE)  # Blocking piece
 
         # Invalid because path is blocked
-        assert (
-            not ChessEngine.is_valid_castling(
-                board,
-                7,
-                4,
-                7,
-                6,
-                PlayerType.WHITE,
-                king_moved=False,
-                kingside_rook_moved=False,
-                queenside_rook_moved=False,
-            )
+        assert not ChessEngine.is_valid_castling(
+            board,
+            7,
+            4,
+            7,
+            6,
+            PlayerType.WHITE,
+            king_moved=False,
+            kingside_rook_moved=False,
+            queenside_rook_moved=False,
         )
 
 
@@ -355,6 +341,180 @@ class TestCheckmate:
         # King is in check but can move to escape
         assert ChessEngine.is_in_check(board, PlayerType.WHITE)
         assert not ChessEngine.is_checkmate(board, PlayerType.WHITE)
+
+
+class TestEnPassant:
+    """Test en passant capture rules."""
+
+    def test_en_passant_target_generation(self):
+        """Test en passant target square generation."""
+        # White pawn moving 2 squares from starting position
+        target = ChessEngine.get_en_passant_target(
+            6,
+            4,
+            4,
+            4,
+            PieceType.PAWN,
+            PlayerType.WHITE,  # e2-e4
+        )
+        assert target == (5, 4)  # e3 square
+
+        # Black pawn moving 2 squares from starting position
+        target = ChessEngine.get_en_passant_target(
+            1,
+            3,
+            3,
+            3,
+            PieceType.PAWN,
+            PlayerType.BLACK,  # d7-d5
+        )
+        assert target == (2, 3)  # d6 square
+
+        # Not a pawn - should return None
+        target = ChessEngine.get_en_passant_target(
+            7, 0, 5, 0, PieceType.ROOK, PlayerType.WHITE
+        )
+        assert target is None
+
+        # Pawn moving only 1 square - should return None
+        target = ChessEngine.get_en_passant_target(
+            6, 4, 5, 4, PieceType.PAWN, PlayerType.WHITE
+        )
+        assert target is None
+
+        # Pawn not from starting position - should return None
+        target = ChessEngine.get_en_passant_target(
+            5, 4, 3, 4, PieceType.PAWN, PlayerType.WHITE
+        )
+        assert target is None
+
+    def test_en_passant_detection(self):
+        """Test en passant move detection."""
+        board = [[NO_PIECE for _ in range(8)] for _ in range(8)]
+
+        # Set up en passant scenario
+        board[3][4] = Piece(PieceType.PAWN, PlayerType.WHITE)  # White pawn on e5
+        board[3][3] = Piece(PieceType.PAWN, PlayerType.BLACK)  # Black pawn on d5
+
+        # En passant target after black pawn moved d7-d5
+        en_passant_target = (2, 3)  # d6 square
+
+        # White pawn should be able to capture en passant
+        assert ChessEngine.is_en_passant_move(
+            board,
+            3,
+            4,
+            2,
+            3,
+            en_passant_target,  # e5xd6 e.p.
+        )
+
+        # Not an en passant move if no target set
+        assert not ChessEngine.is_en_passant_move(board, 3, 4, 2, 3, None)
+
+        # Not an en passant move if not a pawn
+        board[3][4] = Piece(PieceType.ROOK, PlayerType.WHITE)
+        assert not ChessEngine.is_en_passant_move(board, 3, 4, 2, 3, en_passant_target)
+
+    def test_en_passant_validation_in_move(self):
+        """Test en passant validation in regular move validation."""
+        board = [[NO_PIECE for _ in range(8)] for _ in range(8)]
+
+        # Set up en passant scenario - white pawn attacks black pawn
+        board[3][4] = Piece(PieceType.PAWN, PlayerType.WHITE)  # White pawn on e5
+        board[3][3] = Piece(PieceType.PAWN, PlayerType.BLACK)  # Black pawn on d5
+
+        # En passant target after black pawn moved d7-d5
+        en_passant_target = (2, 3)  # d6 square (where white can capture)
+
+        # Should be valid en passant capture
+        assert ChessEngine.is_valid_move(
+            board,
+            3,
+            4,
+            2,
+            3,
+            en_passant_target,  # e5xd6 e.p.
+        )
+
+        # Should not be valid without en passant target
+        assert not ChessEngine.is_valid_move(board, 3, 4, 2, 3, None)
+
+    @pytest.mark.parametrize(
+        "white_start_row,white_start_col,black_pawn_col,expected_target",
+        [
+            (3, 4, 3, (2, 3)),  # White e5, black d5 -> target d6
+            (3, 4, 5, (2, 5)),  # White e5, black f5 -> target f6
+            (4, 2, 1, (3, 1)),  # White c4, black b4 -> target b3
+            (4, 6, 7, (3, 7)),  # White g4, black h4 -> target h3
+        ],
+    )
+    def test_en_passant_scenarios(
+        self, white_start_row, white_start_col, black_pawn_col, expected_target
+    ):
+        """Test various en passant capture scenarios."""
+        board = [[NO_PIECE for _ in range(8)] for _ in range(8)]
+
+        # Place white pawn
+        board[white_start_row][white_start_col] = Piece(
+            PieceType.PAWN, PlayerType.WHITE
+        )
+        # Place black pawn next to it
+        board[white_start_row][black_pawn_col] = Piece(PieceType.PAWN, PlayerType.BLACK)
+
+        # Test en passant capture
+        assert ChessEngine.is_valid_move(
+            board,
+            white_start_row,
+            white_start_col,
+            expected_target[0],
+            expected_target[1],
+            expected_target,
+        )
+
+    def test_black_en_passant_capture(self):
+        """Test black pawn capturing white pawn en passant."""
+        board = [[NO_PIECE for _ in range(8)] for _ in range(8)]
+
+        # Set up scenario - black pawn attacks white pawn
+        board[4][3] = Piece(PieceType.PAWN, PlayerType.BLACK)  # Black pawn on d4
+        board[4][4] = Piece(PieceType.PAWN, PlayerType.WHITE)  # White pawn on e4
+
+        # En passant target after white pawn moved e2-e4
+        en_passant_target = (5, 4)  # e3 square
+
+        # Black should be able to capture en passant
+        assert ChessEngine.is_valid_move(
+            board,
+            4,
+            3,
+            5,
+            4,
+            en_passant_target,  # d4xe3 e.p.
+        )
+
+    def test_en_passant_with_check_situations(self):
+        """Test en passant captures don't work if they leave king in check."""
+        board = [[NO_PIECE for _ in range(8)] for _ in range(8)]
+
+        # Set up a scenario where en passant would expose king to check
+        board[4][4] = Piece(PieceType.KING, PlayerType.WHITE)  # White king on e4
+        board[4][3] = Piece(PieceType.PAWN, PlayerType.WHITE)  # White pawn on d4
+        board[4][2] = Piece(PieceType.PAWN, PlayerType.BLACK)  # Black pawn on c4
+        board[4][0] = Piece(PieceType.ROOK, PlayerType.BLACK)  # Black rook on a4
+
+        # En passant target after black pawn moved c6-c4
+        en_passant_target = (5, 2)  # c3 square
+
+        # This en passant capture would expose the king to the rook
+        # The move validation should prevent this
+        legal_moves = ChessEngine.get_all_legal_moves(
+            board, PlayerType.WHITE, en_passant_target
+        )
+
+        # The en passant capture (4,3) -> (5,2) should not be in legal moves
+        en_passant_move = (4, 3, 5, 2)
+        assert en_passant_move not in legal_moves
 
 
 class TestChessNotation:
