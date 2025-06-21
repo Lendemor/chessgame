@@ -109,7 +109,7 @@ class ChessState(rx.State):
     def can_drag_piece(cls) -> Callable[[rx.Var[Any], DragSourceMonitor], rx.Var[bool]]:
         @rxe.static
         def _can_drag(item: rx.Var[Any], monitor: DragSourceMonitor) -> rx.Var[bool]:
-            return monitor.get_item_type() == PieceType.PAWN.value
+            return True  # Allow dragging all pieces for now
 
         return _can_drag
 
@@ -117,7 +117,7 @@ class ChessState(rx.State):
     def can_drop_piece(cls) -> Callable[[rx.Var[Any], DropTargetMonitor], rx.Var[bool]]:
         @rxe.static
         def _can_drop(item: rx.Var[Any], monitor: DropTargetMonitor) -> rx.Var[bool]:
-            return monitor.get_item_type() == PieceType.PAWN.value
+            return True  # Allow dropping on all squares for now
 
         return _can_drop
 
@@ -148,7 +148,24 @@ def chess_piece(row: int, col: int) -> rx.Component:
     Renders a chess piece based on the piece type.
     The piece type is determined by the state.
     """
-    return rx.box("P")  # Simple test box
+    piece = ChessState.grid[row][col]
+    ncond = (piece.type == PieceType.NONE) & (piece.owner == PlayerType.NONE)
+    still_piece = rx.image(
+        src=f"{pixel_piece_folder}{piece.owner}_{piece.type}.png",
+        class_name="w-full",
+    )
+
+    draggable_piece = rxe.dnd.draggable(
+        still_piece,
+        type=piece.type.to(str),
+        can_drag=ChessState.can_drag_piece(),  # type: ignore
+    )
+
+    return rx.cond(
+        ncond,
+        rx.box(height="100%", width="100%"),  # Empty box with proper dimensions
+        draggable_piece,
+    )
 
 
 @rx.memo
@@ -158,39 +175,33 @@ def chess_square(row: int, col: int) -> rx.Component:
     The color is determined by the row and column.
     """
     player_id = (row + col) % 2
-    # params = rxe.dnd.DropTarget.collected_params
+    params = rxe.dnd.DropTarget.collected_params
 
-    # drop_target = rxe.dnd.drop_target(
-    #     rx.box(
-    #         chess_piece(row, col),
-    #         class_name="w-full aspect-square",
-    #         background_color=rx.cond(player_id == 0, "#E7E5E4", "#44403C"),
-    #         z_index=1,
-    #     ),
-    #     can_drop=ChessState.can_drop_piece(),  # type: ignore
-    #     on_drop=ChessState.on_piece_drop(row, col, params),
-    #     accept=[
-    #         PieceType.PAWN.value,
-    #         PieceType.KNIGHT.value,
-    #         PieceType.BISHOP.value,
-    #         PieceType.ROOK.value,
-    #         PieceType.QUEEN.value,
-    #         PieceType.KING.value,
-    #     ],
-    #     cursor=rx.cond(
-    #         rxe.dnd.Draggable.collected_params.is_dragging,
-    #         "grabbing",
-    #         "grab",
-    #     ),
-    # )
-    # return drop_target
-    
-    return rx.box(
-        chess_piece(row, col),
-        class_name="w-full aspect-square",
-        background_color=rx.cond(player_id == 0, "#E7E5E4", "#44403C"),
-        z_index=1,
+    drop_target = rxe.dnd.drop_target(
+        rx.box(
+            chess_piece(row=row, col=col),
+            class_name="w-full aspect-square",
+            background_color=rx.cond(player_id == 0, "#E7E5E4", "#44403C"),
+            z_index=1,
+            min_height="60px",  # Ensure minimum height for visibility
+        ),
+        can_drop=ChessState.can_drop_piece(),  # type: ignore
+        on_drop=ChessState.on_piece_drop(row, col, params),
+        accept=[
+            PieceType.PAWN.value,
+            PieceType.KNIGHT.value,
+            PieceType.BISHOP.value,
+            PieceType.ROOK.value,
+            PieceType.QUEEN.value,
+            PieceType.KING.value,
+        ],
+        cursor=rx.cond(
+            rxe.dnd.Draggable.collected_params.is_dragging,
+            "grabbing",
+            "grab",
+        ),
     )
+    return drop_target
 
 
 def chessboard() -> rx.Component:
@@ -201,7 +212,7 @@ def chessboard() -> rx.Component:
     squares = []
     for row in range(8):
         for col in range(8):
-            squares.append(chess_square(row, col))
+            squares.append(chess_square(row=row, col=col))
 
     return rx.box(
         rx.grid(
